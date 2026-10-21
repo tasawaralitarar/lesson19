@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -22,6 +22,14 @@ type OrderRequest struct {
 	Quantity  int `json:"quantity"`
 }
 
+type OrderHistoryItem struct {
+	ID          int    `json:"id"`
+	ProductName string `json:"product_name"`
+	Price       int    `json:"price"`
+	Quantity    int    `json:"quantity"`
+	CreatedAt   string `json:"created_at"`
+}
+
 var db *sql.DB
 
 func main() {
@@ -34,12 +42,10 @@ func main() {
 
 	initDB()
 
-	// APIルーティング
 	http.HandleFunc("/api/products", getProductsHandler)
-	http.HandleFunc("/api/product", getProductDetailHandler)
-	http.HandleFunc("/api/orders", createOrderHandler)
+	http.HandleFunc("/api/products/", getProductDetailHandler)
+	http.HandleFunc("/api/orders", ordersHandler)
 
-	// 静的ファイルサーバー
 	fs := http.FileServer(http.Dir("./static"))
 	http.Handle("/", fs)
 
@@ -90,7 +96,6 @@ func initDB() {
 	}
 }
 
-// 全商品一覧を取得するハンドラー
 func getProductsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -118,27 +123,15 @@ func getProductsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(products)
 }
 
-// 特定IDの商品詳細を取得するハンドラー
 func getProductDetailHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	idStr := r.URL.Query().Get("id")
-	if idStr == "" {
-		http.Error(w, "Missing id parameter", http.StatusBadRequest)
-		return
-	}
-
-	id, err := strconv.Atoi(idStr)
-	if err != nil || id <= 0 {
-		http.Error(w, "Invalid id parameter", http.StatusBadRequest)
-		return
-	}
-
+	idStr := strings.TrimPrefix(r.URL.Path, "/api/products/")
 	var p Product
-	err = db.QueryRow("SELECT id, name, price FROM products WHERE id = ?", id).Scan(&p.ID, &p.Name, &p.Price)
+	err := db.QueryRow("SELECT id, name, price FROM products WHERE id = ?", idStr).Scan(&p.ID, &p.Name, &p.Price)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			http.Error(w, "Product not found", http.StatusNotFound)
@@ -152,13 +145,19 @@ func getProductDetailHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(p)
 }
 
-// 注文を作成するハンドラー
-func createOrderHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+func ordersHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		createOrderHandler(w, r)
+	case http.MethodGet:
+		getOrdersHandler(w, r)
+	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
+}
 
+// 既存の POST /api/orders (変更なし)
+func createOrderHandler(w http.ResponseWriter, r *http.Request) {
 	var req OrderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid input", http.StatusBadRequest)
@@ -186,4 +185,34 @@ func createOrderHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"message": "注文しました"})
+}
+
+// 新規追加: GET /api/orders
+func getOrdersHandler(w http.ResponseWriter, r *http.Request) {
+	query := `
+		SELECT o.id, p.name, p.price, o.quantity, o.created_at
+		FROM orders o
+		JOIN products p ON o.product_id = p.id
+		ORDER BY o.created_at DESC, o.id DESC
+	`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	orders := []OrderHistoryItem{}
+	for rows.Next() {
+		var item OrderHistoryItem
+		if err := rows.Scan(&item.ID, &item.ProductName, &item.Price, &item.Quantity, &item.CreatedAt); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		orders = append(orders, item)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(orders)
 }
